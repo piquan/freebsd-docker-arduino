@@ -1,0 +1,45 @@
+#! /usr/local/bin/bash
+
+set -ex
+
+image=arduino
+
+if [[ -z $DISPLAY || -n $* ]] ; then
+    # Just run the CLI command given to us; don't try to set up X.
+    exec docker run --rm -it --device /dev/ttyACM0:/dev/ttyACM0 $image "$@"
+fi
+
+# Create a directory on the docker-machine to store the shared files
+# (xauth data and a socket).
+machine=${DOCKER_MACHINE_NAME:?Not using docker-machine}
+dockshare=$(docker-machine ssh $machine mktemp -d -t arduino.XXXXXX)
+
+# Ask the X server for a temporary xauth token to let the container
+# connect.  The key will have the default 60-second time limit for the
+# IDE to connect.
+xauthfile=$(mktemp -t arduino.xauth)
+trap "rm -f $xauthfile;docker-machine ssh $machine rm -rf $dockshare" EXIT
+# On KDE at least, the Arduino IDE won't get focus if I use an untrusted key.
+xauth -v -f $xauthfile generate $DISPLAY . trusted
+# The xauth entries include a hostname.  If there's a mismatch, that
+# key won't be used.  We switch the method to be a wildcard, which
+# ignores the hostname.  See also Xsecurity(7).
+xauth -f $xauthfile nlist |                     \
+    sed -e 's/^..../ffff/' |                    \
+    xauth -f $xauthfile nmerge -
+docker-machine scp $xauthfile $machine:$dockshare/Xauthority
+rm -f $xauthfile
+
+# FIXME This won't work on remote displays.
+docker-machine ssh $machine -akvxf -o ExitOnForwardFailure=yes  \
+               -R $dockshare/X:/tmp/.X11-unix/X${DISPLAY#:}     \
+               sleep 60
+
+docker run --rm -it                                                     \
+       --env DISPLAY=:0                                                 \
+       --device /dev/ttyACM0:/dev/ttyACM0                               \
+       -v $dockshare/X:/tmp/.X11-unix/X0                                \
+       -v $dockshare/Xauthority:/home/user/.Xauthority                  \
+       -v /hosthome/${HOME#/home}/Arduino:/home/user/Arduino            \
+       -v /hosthome/${HOME#/home}/.arduino15:/home/user/.arduino15      \
+       $image "$@"
